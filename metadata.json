@@ -1,0 +1,6 @@
+{
+  "name": "Achri DZ",
+  "description": "A multi-user online marketplace where anyone can list and sell items, featuring categories, search, user profiles, and dynamic item listings inspired by eBay.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

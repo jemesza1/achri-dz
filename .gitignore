@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment variables (never commit real secrets)
+.env
+.env.local
+.env.*.local
+
+# Local "database" — contains real user accounts (hashed passwords),
+# phone numbers and messages once the app is used. Never publish this.
+# The server auto-creates an empty one on first run if it's missing.
+data/db.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# TypeScript build info
+*.tsbuildinfo
