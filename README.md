@@ -29,15 +29,43 @@ Une marketplace complète (style eBay) construite avec React, Express et l'API G
 
 - Les comptes sont de vrais comptes côté serveur : les mots de passe sont hashés avec `bcrypt` avant d'être stockés dans `data/db.json` (jamais en clair).
 - La connexion repose sur une session signée (JWT) stockée dans un cookie `httpOnly` — elle n'est plus simulée via `localStorage` côté client.
-- Déposer une annonce (`/vendre`) nécessite désormais d'être connecté ; l'email du vendeur est toujours celui du compte authentifié et ne peut pas être falsifié depuis le formulaire.
+- Déposer une annonce (`/vendre`) nécessite d'être connecté **et** d'avoir confirmé son email ou son téléphone (voir ci-dessous) ; l'email du vendeur est toujours celui du compte authentifié et ne peut pas être falsifié depuis le formulaire.
 - Pensez à définir un `JWT_SECRET` fort avant tout déploiement en production (voir `.env.example`).
+
+### Connexion Google
+
+- Bouton "Continuer avec Google" sur `/connexion`, propulsé par Google Identity Services côté client et vérifié côté serveur (`google-auth-library`).
+- Sans `GOOGLE_CLIENT_ID` configuré, le bouton est simplement masqué (pas d'erreur visible) — le site reste pleinement fonctionnel en email/mot de passe.
+- Pour l'activer : créer un projet sur [console.cloud.google.com](https://console.cloud.google.com) → APIs & Services → Identifiants → Créer des identifiants → ID client OAuth → Application Web. Ajouter l'URL du site dans "Origines JavaScript autorisées". Coller le Client ID obtenu dans `GOOGLE_CLIENT_ID`. Gratuit, ~5 minutes.
+
+### Vérification email / téléphone
+
+- À l'inscription, le compte est créé mais marqué non vérifié ; un lien de confirmation est envoyé par email (`/api/auth/verify-email`).
+- Depuis `/profil`, l'utilisateur peut aussi renvoyer ce lien ou demander un code par SMS (6 chiffres, valable 10 minutes) pour vérifier son téléphone à la place.
+- Publier une annonce exige qu'**au moins une** des deux méthodes soit confirmée (anti-spam/anti-faux comptes).
+- **Sans `SMTP_*` / `TWILIO_*` configurés**, les liens et codes sont simplement affichés dans les logs du serveur au lieu d'être envoyés — pratique pour tester en local, **mais inutilisable pour de vrais utilisateurs**. Voir `.env.example` pour la configuration SMTP (ex. Gmail) et Twilio (SMS, payant).
+- Les comptes créés avant l'ajout de cette fonctionnalité sont automatiquement considérés comme vérifiés (pas de blocage rétroactif).
 
 ## Sécurité avant de publier sur GitHub
 
 - Ne commitez jamais `.env`, `.env.local` ni `data/db.json` (vrais comptes, mots de passe hashés, messages, numéros de téléphone) — ils sont listés dans `.gitignore`. Le fichier `data/db.json` est recréé automatiquement (vide) au premier lancement.
 - Définissez un `JWT_SECRET` unique et aléatoire dans l'environnement de production : `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`. Sans lui, le serveur refuse de démarrer en production (il ne tourne qu'avec un secret de secours non sécurisé en local).
-- Définissez `APP_URL` en production avec l'URL exacte de votre site déployé — c'est la seule origine autorisée à faire des requêtes authentifiées (CORS). En développement, toute origine `localhost` est acceptée.
-- Si vous forkez/publiez ce dépôt, vérifiez qu'aucune clé réelle (`GEMINI_API_KEY`, `JWT_SECRET`, etc.) n'a été committée par erreur avant de rendre le dépôt public — `git log -p` ou un scanner de secrets (ex. `gitleaks`) peuvent aider.
+- Définissez `APP_URL` en production avec l'URL exacte de votre site déployé — c'est la seule origine autorisée à faire des requêtes authentifiées (CORS), et c'est aussi le domaine utilisé dans les liens de vérification email. En développement, toute origine `localhost` est acceptée.
+- Si vous forkez/publiez ce dépôt, vérifiez qu'aucune clé réelle (`GEMINI_API_KEY`, `JWT_SECRET`, `GOOGLE_CLIENT_ID`, `SMTP_PASS`, `TWILIO_AUTH_TOKEN`, etc.) n'a été committée par erreur avant de rendre le dépôt public — `git log -p` ou un scanner de secrets (ex. `gitleaks`) peuvent aider.
+
+## Checklist avant de passer en public
+
+1. **Variables d'environnement** (à définir sur la plateforme d'hébergement, jamais committées) :
+   - `JWT_SECRET` — obligatoire, sinon le serveur refuse de démarrer en production.
+   - `APP_URL` — l'URL exacte du site déployé (ex. `https://achridz.com`).
+   - `GEMINI_API_KEY` — optionnel, sinon génération de description en mode démo.
+   - `GOOGLE_CLIENT_ID` — optionnel, sinon le bouton Google est masqué.
+   - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` — requis pour envoyer de vrais emails de vérification. Sans eux, les liens ne partent que dans les logs serveur.
+   - `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` — requis pour envoyer de vrais SMS. Sans eux, les codes ne partent que dans les logs serveur.
+2. **HTTPS** — le cookie de session passe en mode `secure` automatiquement dès que `NODE_ENV=production` ; le site doit donc être servi en HTTPS (la plupart des hébergeurs le font automatiquement).
+3. **Build** : `npm run build` puis `npm start` (et non `npm run dev`, qui sert le frontend via Vite en mode dev).
+4. **Sauvegarde des données** — `data/db.json` est un fichier unique sur disque : pensez à une sauvegarde régulière (export/cron) avant d'avoir de vrais utilisateurs, et vérifiez que l'hébergeur choisi a un disque persistant (certains PaaS réinitialisent le système de fichiers à chaque déploiement).
+5. **Limites de débit** déjà en place : 100 req/15 min par IP sur `/api/`, 20/15 min sur les routes d'authentification, 30/15 min sur les actions sensibles (enchères, achats, messages, génération IA) — à ajuster dans `server.ts` selon le trafic réel observé.
 
 ## Notes
 

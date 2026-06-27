@@ -2,32 +2,51 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { SlidersHorizontal, X } from "lucide-react";
 import ListingCard from "../components/ListingCard";
-import { fetchListings } from "../lib/api";
+import { fetchListingsPaged } from "../lib/api";
 import { useI18n, tCategory, tWilaya } from "../lib/i18n";
 import { CATEGORIES, WILAYAS } from "../types";
 import type { Listing } from "../types";
+
+const PAGE_SIZE = 24;
 
 export default function SearchResults() {
   const { t, lang } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const [listings, setListings] = useState<Listing[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [sort, setSort] = useState<"newest" | "price_asc" | "price_desc">("newest");
 
   const search = searchParams.get("search") || "";
   const category = searchParams.get("category") || "Toutes";
   const wilaya = searchParams.get("wilaya") || "Toutes";
   const type = searchParams.get("type") || "Toutes";
+  const minPrice = searchParams.get("minPrice") || "";
+  const maxPrice = searchParams.get("maxPrice") || "";
+  const sort = (searchParams.get("sort") as "newest" | "price_asc" | "price_desc" | "popular") || "newest";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   useEffect(() => {
     setLoading(true);
-    fetchListings({ search, category, wilaya, type })
-      .then(setListings)
+    fetchListingsPaged({
+      search,
+      category,
+      wilaya,
+      type,
+      minPrice: minPrice ? Number(minPrice) : undefined,
+      maxPrice: maxPrice ? Number(maxPrice) : undefined,
+      sort,
+      page,
+      pageSize: PAGE_SIZE,
+    })
+      .then(({ items, total }) => {
+        setListings(items);
+        setTotal(total);
+      })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [search, category, wilaya, type]);
+  }, [search, category, wilaya, type, minPrice, maxPrice, sort, page]);
 
   function updateFilter(key: string, value: string) {
     const params = new URLSearchParams(searchParams);
@@ -36,16 +55,26 @@ export default function SearchResults() {
     } else {
       params.set(key, value);
     }
+    params.delete("page");
     setSearchParams(params);
   }
 
-  const sorted = [...listings].sort((a, b) => {
-    if (sort === "price_asc") return a.price - b.price;
-    if (sort === "price_desc") return b.price - a.price;
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
+  function setPage(newPage: number) {
+    const params = new URLSearchParams(searchParams);
+    if (newPage <= 1) params.delete("page");
+    else params.set("page", String(newPage));
+    setSearchParams(params);
+  }
 
-  const activeFilterCount = [category !== "Toutes", wilaya !== "Toutes", type !== "Toutes"].filter(Boolean).length;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const activeFilterCount = [
+    category !== "Toutes",
+    wilaya !== "Toutes",
+    type !== "Toutes",
+    !!minPrice,
+    !!maxPrice,
+  ].filter(Boolean).length;
 
   const FilterPanel = (
     <div className="space-y-6">
@@ -86,6 +115,29 @@ export default function SearchResults() {
         </div>
       </div>
 
+      <div>
+        <h3 className="font-display font-semibold text-sm text-ink mb-2.5">{t("search.priceRange")}</h3>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            placeholder={t("search.minPrice")}
+            defaultValue={minPrice}
+            onBlur={(e) => updateFilter("minPrice", e.target.value)}
+            className="w-full h-10 rounded-lg border border-ink/15 bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+          />
+          <span className="text-ink-soft">–</span>
+          <input
+            type="number"
+            min={0}
+            placeholder={t("search.maxPrice")}
+            defaultValue={maxPrice}
+            onBlur={(e) => updateFilter("maxPrice", e.target.value)}
+            className="w-full h-10 rounded-lg border border-ink/15 bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+          />
+        </div>
+      </div>
+
       {activeFilterCount > 0 && (
         <button
           onClick={() => setSearchParams(search ? { search } : {})}
@@ -111,7 +163,7 @@ export default function SearchResults() {
           {t("search.filters")} {activeFilterCount > 0 && `(${activeFilterCount})`}
         </button>
       </div>
-      <p className="text-sm text-ink-soft mb-5">{!loading && `${sorted.length} ${t("search.resultsCount")}`}</p>
+      <p className="text-sm text-ink-soft mb-5">{!loading && `${total} ${t("search.resultsCount")}`}</p>
 
       <div className="grid lg:grid-cols-[240px_1fr] gap-8">
         <aside className="hidden lg:block">{FilterPanel}</aside>
@@ -135,12 +187,13 @@ export default function SearchResults() {
           <div className="flex justify-end mb-4">
             <select
               value={sort}
-              onChange={(e) => setSort(e.target.value as typeof sort)}
+              onChange={(e) => updateFilter("sort", e.target.value)}
               className="h-9 rounded-lg border border-ink/15 bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
             >
               <option value="newest">{t("search.sort.newest")}</option>
               <option value="price_asc">{t("search.sort.priceAsc")}</option>
               <option value="price_desc">{t("search.sort.priceDesc")}</option>
+              <option value="popular">{t("search.sort.popular")}</option>
             </select>
           </div>
 
@@ -154,18 +207,42 @@ export default function SearchResults() {
 
           {error && <p className="text-rose text-sm">{error}</p>}
 
-          {!loading && !error && sorted.length === 0 && (
+          {!loading && !error && listings.length === 0 && (
             <div className="text-center py-16 border border-dashed border-ink/15 rounded-2xl">
               <p className="text-ink-soft">{t("search.noResults")}</p>
             </div>
           )}
 
-          {!loading && !error && sorted.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
-              {sorted.map((listing) => (
-                <ListingCard key={listing.id} listing={listing} />
-              ))}
-            </div>
+          {!loading && !error && listings.length > 0 && (
+            <>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                {listings.map((listing) => (
+                  <ListingCard key={listing.id} listing={listing} />
+                ))}
+              </div>
+
+              {totalPages > 1 && (
+                <div className="flex items-center justify-center gap-2 mt-8">
+                  <button
+                    disabled={page <= 1}
+                    onClick={() => setPage(page - 1)}
+                    className="h-9 px-3 rounded-lg border border-ink/15 text-sm font-medium text-ink-soft hover:bg-sand-dim disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {t("search.prevPage")}
+                  </button>
+                  <span className="text-sm text-ink-soft px-2">
+                    {t("search.pageOf").replace("{page}", String(page)).replace("{total}", String(totalPages))}
+                  </span>
+                  <button
+                    disabled={page >= totalPages}
+                    onClick={() => setPage(page + 1)}
+                    className="h-9 px-3 rounded-lg border border-ink/15 text-sm font-medium text-ink-soft hover:bg-sand-dim disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {t("search.nextPage")}
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>

@@ -1,14 +1,18 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import { OAuth2Client } from "google-auth-library";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import cookieParser from "cookie-parser";
+import nodemailer from "nodemailer";
+import twilio from "twilio";
 
 // Security: secret used to sign session tokens. In production this MUST be set
 // via the JWT_SECRET environment variable — the fallback below is only for
@@ -39,6 +43,9 @@ interface SessionUser {
   phone: string;
   wilaya: string;
   favorites: string[];
+  emailVerified: boolean;
+  phoneVerified: boolean;
+  authProvider: "local" | "google";
 }
 
 function signToken(userId: string) {
@@ -46,7 +53,76 @@ function signToken(userId: string) {
 }
 
 function publicUser(u: any): SessionUser {
-  return { id: u.id, name: u.name, email: u.email, phone: u.phone, wilaya: u.wilaya, favorites: u.favorites || [] };
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    phone: u.phone,
+    wilaya: u.wilaya,
+    favorites: u.favorites || [],
+    emailVerified: !!u.emailVerified,
+    phoneVerified: !!u.phoneVerified,
+    authProvider: u.authProvider || "local",
+  };
+}
+
+// ------------------- EMAIL & SMS DELIVERY -------------------
+// Both deliveries degrade gracefully when no provider is configured: instead
+// of failing, they log the message to the server console. This keeps
+// registration/verification fully testable in local dev without needing a
+// real SMTP/Twilio account, while still working for real users in production
+// once SMTP_* / TWILIO_* env vars are set (see .env.example).
+
+let mailer: ReturnType<typeof nodemailer.createTransport> | null = null;
+function getMailer() {
+  if (mailer) return mailer;
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) return null;
+  mailer = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: Number(process.env.SMTP_PORT) === 465,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  return mailer;
+}
+
+async function sendVerificationEmail(to: string, link: string) {
+  const transport = getMailer();
+  if (!transport) {
+    console.log(`📧 [DEV — pas de SMTP configuré] Lien de vérification pour ${to} : ${link}`);
+    return;
+  }
+  await transport.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to,
+    subject: "Confirmez votre compte Achri DZ",
+    html: `<p>Bonjour,</p><p>Cliquez sur ce lien pour confirmer votre adresse email :</p><p><a href="${link}">${link}</a></p><p>Ce lien expire dans 24 heures.</p>`,
+  });
+}
+
+let twilioClient: ReturnType<typeof twilio> | null = null;
+function getTwilioClient() {
+  if (twilioClient) return twilioClient;
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) return null;
+  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  return twilioClient;
+}
+
+async function sendVerificationSms(to: string, code: string) {
+  const client = getTwilioClient();
+  if (!client || !process.env.TWILIO_FROM_NUMBER) {
+    console.log(`📱 [DEV — pas de Twilio configuré] Code de vérification pour ${to} : ${code}`);
+    return;
+  }
+  await client.messages.create({
+    to,
+    from: process.env.TWILIO_FROM_NUMBER,
+    body: `Achri DZ — votre code de vérification est : ${code}`,
+  });
+}
+
+function generateOtp(): string {
+  return String(crypto.randomInt(100000, 1000000));
 }
 
 // Computes ratingAverage/ratingCount from a listing's reviews on the fly,
@@ -104,6 +180,7 @@ app.use(
       callback(new Error("Origine non autorisée par la politique CORS."));
     },
     credentials: true,
+    exposedHeaders: ["X-Total-Count"],
   })
 );
 app.use(cookieParser());
@@ -120,6 +197,45 @@ app.use("/api/", limiter); // Apply rate limiter only to API routes
 
 // Security: Strict payload limit to prevent large file crashes
 app.use(express.json({ limit: "500kb" }));
+
+// Closes auctions whose auctionEnd has passed: the highest bidder wins
+// (marked sold, buyerDetails filled from their bid) or, if nobody bid, the
+// listing is flagged auctionEnded so the UI can show "no winner" instead of
+// leaving it open forever. Called on every DB read (self-healing) and from
+// a periodic sweep so it also runs without incoming traffic. Returns true
+// if any listing was changed, so the caller knows whether to persist.
+function closeExpiredAuctions(db: any): boolean {
+  let changed = false;
+  const now = Date.now();
+  for (const listing of db.listings) {
+    if (
+      listing.type === "auction" &&
+      !listing.sold &&
+      !listing.auctionEnded &&
+      listing.auctionEnd &&
+      new Date(listing.auctionEnd).getTime() < now
+    ) {
+      const topBid = listing.bids.length > 0
+        ? listing.bids.reduce((max: any, b: any) => (b.amount > max.amount ? b : max), listing.bids[0])
+        : null;
+      if (topBid) {
+        listing.sold = true;
+        listing.soldTo = topBid.bidderName;
+        listing.buyerDetails = {
+          buyerName: topBid.bidderName,
+          buyerPhone: topBid.bidderPhone,
+          buyerAddress: "",
+          quantity: 1,
+          purchasedAt: new Date().toISOString(),
+        };
+      } else {
+        listing.auctionEnded = true;
+      }
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 // Helper to ensure DB exists and read it
 function readDB() {
@@ -140,6 +256,11 @@ function readDB() {
     if (!data.users) data.users = [];
     data.users.forEach((u: any) => {
       if (!u.favorites) u.favorites = [];
+      // Accounts created before email/phone verification existed are
+      // grandfathered in as verified so they aren't suddenly locked out.
+      if (u.emailVerified === undefined) u.emailVerified = true;
+      if (u.phoneVerified === undefined) u.phoneVerified = false;
+      if (!u.authProvider) u.authProvider = "local";
     });
     // Backward compatibility: older listings may be missing the new
     // e-commerce fields (gallery images, stock quantity, reviews).
@@ -148,6 +269,9 @@ function readDB() {
       if (typeof l.quantity !== "number") l.quantity = 1;
       if (!l.reviews) l.reviews = [];
     });
+    if (closeExpiredAuctions(data)) {
+      fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+    }
     return data;
   } catch (err) {
     console.error("Error reading DB:", err);
@@ -166,6 +290,23 @@ function writeDB(data: any) {
   } catch (err) {
     console.error("Error writing DB:", err);
   }
+}
+
+// readDB/writeDB are synchronous and the route handlers that mutate the DB
+// are themselves synchronous between the read and the write, but Node can
+// still interleave two requests' handlers across awaited work. withDBLock
+// serializes read-modify-write sections so concurrent bids/purchases can't
+// race and lose an update (e.g. two buyers decrementing stale stock counts).
+let dbLock: Promise<any> = Promise.resolve();
+function withDBLock<T>(fn: (db: any) => T): Promise<T> {
+  const run = dbLock.then(() => {
+    const db = readDB();
+    const result = fn(db);
+    writeDB(db);
+    return result;
+  });
+  dbLock = run.catch(() => {});
+  return run;
 }
 
 // ------------------- AUTH HELPERS & ROUTES -------------------
@@ -196,6 +337,18 @@ function requireAuth(req: any, res: any, next: any) {
   next();
 }
 
+// Anti-fraud guard for actions where seller trust matters (posting a listing):
+// requires the account's email or phone to be confirmed via a real channel,
+// not just self-declared at registration. Must run after requireAuth.
+function requireVerified(req: any, res: any, next: any) {
+  if (!req.user.emailVerified && !req.user.phoneVerified) {
+    return res.status(403).json({
+      error: "Veuillez vérifier votre adresse email ou votre numéro de téléphone avant de publier une annonce.",
+    });
+  }
+  next();
+}
+
 function setSessionCookie(res: any, userId: string) {
   res.cookie(TOKEN_COOKIE, signToken(userId), {
     httpOnly: true,
@@ -209,6 +362,16 @@ function setSessionCookie(res: any, userId: string) {
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+  message: { error: "Trop de tentatives. Veuillez réessayer plus tard." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// Stricter rate limit for actions that are cheap to spam but costly to the
+// platform/other users (bids, purchases, messages) or to us (Gemini calls).
+const writeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
   message: { error: "Trop de tentatives. Veuillez réessayer plus tard." },
   standardHeaders: true,
   legacyHeaders: false,
@@ -235,6 +398,7 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
   }
 
   const passwordHash = await bcrypt.hash(password, 10);
+  const emailVerificationToken = crypto.randomBytes(32).toString("hex");
   const newUser = {
     id: `user-${Date.now()}`,
     name,
@@ -242,14 +406,180 @@ app.post("/api/auth/register", authLimiter, async (req, res) => {
     phone,
     wilaya,
     passwordHash,
+    authProvider: "local",
     createdAt: new Date().toISOString(),
+    emailVerified: false,
+    emailVerificationToken,
+    emailVerificationExpires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    phoneVerified: false,
   };
 
   db.users.push(newUser);
   writeDB(db);
 
+  const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
+  const verifyLink = `${appUrl}/api/auth/verify-email?token=${emailVerificationToken}`;
+  sendVerificationEmail(normalizedEmail, verifyLink).catch((err) =>
+    console.error("Échec d'envoi de l'email de vérification:", err)
+  );
+
   setSessionCookie(res, newUser.id);
   res.status(201).json(publicUser(newUser));
+});
+
+// Confirm an account's email address via the link sent at registration.
+app.get("/api/auth/verify-email", (req, res) => {
+  const token = req.query.token as string;
+  if (!token) {
+    return res.status(400).send("Lien de vérification invalide.");
+  }
+
+  const db = readDB();
+  const dbUser = db.users.find((u: any) => u.emailVerificationToken === token);
+
+  if (!dbUser) {
+    return res.status(400).send("Lien de vérification invalide ou déjà utilisé.");
+  }
+  if (dbUser.emailVerificationExpires && new Date(dbUser.emailVerificationExpires).getTime() < Date.now()) {
+    return res.status(400).send("Ce lien a expiré. Demandez-en un nouveau depuis votre profil.");
+  }
+
+  dbUser.emailVerified = true;
+  delete dbUser.emailVerificationToken;
+  delete dbUser.emailVerificationExpires;
+  writeDB(db);
+
+  res.redirect(`${process.env.APP_URL || `http://localhost:${PORT}`}/?emailVerified=1`);
+});
+
+// Resend the email verification link (logged-in users only).
+app.post("/api/auth/resend-verification-email", writeLimiter, requireAuth, async (req: any, res) => {
+  const db = readDB();
+  const dbUser = db.users.find((u: any) => u.id === req.user.id);
+  if (!dbUser) return res.status(404).json({ error: "Compte introuvable." });
+  if (dbUser.emailVerified) return res.status(400).json({ error: "Cette adresse email est déjà vérifiée." });
+
+  const emailVerificationToken = crypto.randomBytes(32).toString("hex");
+  dbUser.emailVerificationToken = emailVerificationToken;
+  dbUser.emailVerificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  writeDB(db);
+
+  const appUrl = process.env.APP_URL || `http://localhost:${PORT}`;
+  const verifyLink = `${appUrl}/api/auth/verify-email?token=${emailVerificationToken}`;
+  await sendVerificationEmail(dbUser.email, verifyLink).catch((err) =>
+    console.error("Échec d'envoi de l'email de vérification:", err)
+  );
+
+  res.json({ ok: true });
+});
+
+// Request an SMS OTP code to verify the account's phone number.
+app.post("/api/auth/request-phone-otp", writeLimiter, requireAuth, async (req: any, res) => {
+  const db = readDB();
+  const dbUser = db.users.find((u: any) => u.id === req.user.id);
+  if (!dbUser) return res.status(404).json({ error: "Compte introuvable." });
+  if (dbUser.phoneVerified) return res.status(400).json({ error: "Ce numéro est déjà vérifié." });
+  if (!dbUser.phone) return res.status(400).json({ error: "Aucun numéro de téléphone renseigné." });
+
+  const otp = generateOtp();
+  dbUser.phoneOtp = otp;
+  dbUser.phoneOtpExpires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  writeDB(db);
+
+  await sendVerificationSms(dbUser.phone, otp).catch((err) =>
+    console.error("Échec d'envoi du SMS de vérification:", err)
+  );
+
+  res.json({ ok: true });
+});
+
+// Confirm the phone number using the OTP code sent above.
+app.post("/api/auth/verify-phone-otp", writeLimiter, requireAuth, (req: any, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: "Veuillez entrer le code reçu par SMS." });
+
+  const db = readDB();
+  const dbUser = db.users.find((u: any) => u.id === req.user.id);
+  if (!dbUser) return res.status(404).json({ error: "Compte introuvable." });
+  if (!dbUser.phoneOtp || !dbUser.phoneOtpExpires) {
+    return res.status(400).json({ error: "Demandez d'abord un code de vérification." });
+  }
+  if (new Date(dbUser.phoneOtpExpires).getTime() < Date.now()) {
+    return res.status(400).json({ error: "Ce code a expiré. Demandez-en un nouveau." });
+  }
+  if (dbUser.phoneOtp !== String(code).trim()) {
+    return res.status(400).json({ error: "Code incorrect." });
+  }
+
+  dbUser.phoneVerified = true;
+  delete dbUser.phoneOtp;
+  delete dbUser.phoneOtpExpires;
+  writeDB(db);
+
+  res.json(publicUser(dbUser));
+});
+
+// Sign in (or sign up) with a Google ID token obtained client-side via
+// Google Identity Services. We verify the token's signature/audience
+// server-side rather than trusting any user data sent from the client.
+const googleClient = process.env.GOOGLE_CLIENT_ID ? new OAuth2Client(process.env.GOOGLE_CLIENT_ID) : null;
+app.post("/api/auth/google", authLimiter, async (req, res) => {
+  const { idToken } = req.body;
+  if (!idToken || typeof idToken !== "string") {
+    return res.status(400).json({ error: "Jeton Google manquant." });
+  }
+  if (!googleClient) {
+    return res.status(503).json({ error: "La connexion Google n'est pas configurée sur ce serveur." });
+  }
+
+  let payload;
+  try {
+    const ticket = await googleClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID });
+    payload = ticket.getPayload();
+  } catch {
+    return res.status(401).json({ error: "Jeton Google invalide." });
+  }
+  if (!payload?.email) {
+    return res.status(401).json({ error: "Jeton Google invalide." });
+  }
+  if (!payload.email_verified) {
+    return res.status(401).json({ error: "Votre compte Google doit avoir une adresse email vérifiée." });
+  }
+
+  const db = readDB();
+  const normalizedEmail = payload.email.toLowerCase().trim();
+  let dbUser = db.users.find((u: any) => u.email === normalizedEmail);
+
+  if (!dbUser) {
+    dbUser = {
+      id: `user-${Date.now()}`,
+      name: payload.name || normalizedEmail.split("@")[0],
+      email: normalizedEmail,
+      phone: "",
+      wilaya: "",
+      passwordHash: null,
+      authProvider: "google",
+      createdAt: new Date().toISOString(),
+      emailVerified: true,
+      phoneVerified: false,
+      favorites: [],
+    };
+    db.users.push(dbUser);
+    writeDB(db);
+  } else if (!dbUser.emailVerified) {
+    // Google already verified this email address, so trust it even if the
+    // account was originally created with the local email/password flow.
+    dbUser.emailVerified = true;
+    writeDB(db);
+  }
+
+  setSessionCookie(res, dbUser.id);
+  res.json(publicUser(dbUser));
+});
+
+// Public, non-secret config the frontend needs at runtime (no API keys).
+app.get("/api/config", (_req, res) => {
+  res.json({ googleClientId: process.env.GOOGLE_CLIENT_ID || null });
 });
 
 // Log in to an existing account
@@ -290,7 +620,7 @@ app.get("/api/auth/me", (req: any, res) => {
 
 // ------------------- API ROUTES -------------------
 
-// 1. Get all listings with filter & search
+// 1. Get all listings with filter, search, sort & pagination
 app.get("/api/listings", (req, res) => {
   const db = readDB();
   let results = [...db.listings];
@@ -301,6 +631,11 @@ app.get("/api/listings", (req, res) => {
   const type = req.query.type as string; // 'buy_it_now' | 'auction'
   const filterUser = req.query.sellerEmail as string; // filter by seller
   const transactionMode = req.query.transactionMode as string; // 'sell' | 'buy'
+  const minPrice = req.query.minPrice !== undefined ? Number(req.query.minPrice) : undefined;
+  const maxPrice = req.query.maxPrice !== undefined ? Number(req.query.maxPrice) : undefined;
+  const sort = (req.query.sort as string) || "newest"; // newest | price_asc | price_desc | popular
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 24));
 
   // Ensure backward compatibility by mapping missing transactionMode to "sell"
   results = results.map((item) => {
@@ -339,10 +674,30 @@ app.get("/api/listings", (req, res) => {
     results = results.filter((item) => item.sellerEmail === filterUser);
   }
 
-  // Sort by newest first
-  results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  if (Number.isFinite(minPrice)) {
+    results = results.filter((item) => item.price >= (minPrice as number));
+  }
 
-  res.json(results.map(withComputedRating));
+  if (Number.isFinite(maxPrice)) {
+    results = results.filter((item) => item.price <= (maxPrice as number));
+  }
+
+  if (sort === "price_asc") {
+    results.sort((a, b) => a.price - b.price);
+  } else if (sort === "price_desc") {
+    results.sort((a, b) => b.price - a.price);
+  } else if (sort === "popular") {
+    results.sort((a, b) => (b.views || 0) - (a.views || 0));
+  } else {
+    results.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  const total = results.length;
+  const start = (page - 1) * pageSize;
+  const paged = results.slice(start, start + pageSize);
+
+  res.set("X-Total-Count", String(total));
+  res.json(paged.map(withComputedRating));
 });
 
 // 2. Get specific listing & increment views
@@ -364,9 +719,32 @@ app.get("/api/listings/:id", (req: any, res) => {
   res.json(withComputedRating(db.listings[listingIndex]));
 });
 
+// 2b. Similar listings — same category, excluding the listing itself and
+// sold items, ranked by popularity (views) then recency. Lightweight
+// "people also viewed"-style recommendation without per-user tracking.
+app.get("/api/listings/:id/similar", (req, res) => {
+  const db = readDB();
+  const listing = db.listings.find((item: any) => item.id === req.params.id);
+  if (!listing) {
+    return res.status(404).json({ error: "Annonce introuvable" });
+  }
+
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 8));
+  const similar = db.listings
+    .filter((item: any) => item.id !== listing.id && !item.sold && item.category === listing.category)
+    .sort((a: any, b: any) => {
+      const byViews = (b.views || 0) - (a.views || 0);
+      if (byViews !== 0) return byViews;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    })
+    .slice(0, limit);
+
+  res.json(similar.map(withComputedRating));
+});
+
 // 3. Create listing (requires a logged-in account — seller identity is taken
 // from the session, not from the request body, so users can't post as someone else)
-app.post("/api/listings", requireAuth, (req: any, res) => {
+app.post("/api/listings", requireAuth, requireVerified, (req: any, res) => {
   const {
     title,
     description,
@@ -446,153 +824,92 @@ app.post("/api/listings", requireAuth, (req: any, res) => {
 });
 
 // 4. Place a bid on an auction
-app.post("/api/listings/:id/bids", (req: any, res) => {
-  const { bidderName, bidderPhone, amount } = req.body;
+app.post("/api/listings/:id/bids", writeLimiter, requireAuth, async (req: any, res) => {
+  const { amount } = req.body;
 
-  if (!bidderName || !bidderPhone || !amount) {
-    return res.status(400).json({ error: "Veuillez indiquer votre nom, téléphone et le montant de l'offre." });
+  if (!amount) {
+    return res.status(400).json({ error: "Veuillez indiquer le montant de l'offre." });
   }
 
-  const db = readDB();
-  const listingIndex = db.listings.findIndex((item: any) => item.id === req.params.id);
+  const result = await withDBLock((db) => {
+    const listingIndex = db.listings.findIndex((item: any) => item.id === req.params.id);
+    if (listingIndex === -1) {
+      return { status: 404, body: { error: "Annonce introuvable." } };
+    }
 
-  if (listingIndex === -1) {
-    return res.status(404).json({ error: "Annonce introuvable." });
-  }
+    const listing = db.listings[listingIndex];
 
-  const listing = db.listings[listingIndex];
+    if (req.user.email === listing.sellerEmail) {
+      return { status: 400, body: { error: "Vous ne pouvez pas enchérir sur votre propre annonce." } };
+    }
 
-  if (req.user && req.user.email === listing.sellerEmail) {
-    return res.status(400).json({ error: "Vous ne pouvez pas enchérir sur votre propre annonce." });
-  }
+    if (listing.type !== "auction") {
+      return { status: 400, body: { error: "Ce produit n'est pas vendu aux enchères." } };
+    }
 
-  if (listing.type !== "auction") {
-    return res.status(400).json({ error: "Ce produit n'est pas vendu aux enchères." });
-  }
+    if (listing.sold || new Date(listing.auctionEnd).getTime() < Date.now()) {
+      return { status: 400, body: { error: "Ces enchères sont terminées." } };
+    }
 
-  if (listing.sold || new Date(listing.auctionEnd).getTime() < Date.now()) {
-    return res.status(400).json({ error: "Ces enchères sont terminées." });
-  }
+    const bidAmount = Number(amount);
+    const currentMaxBid = listing.bids.length > 0
+      ? Math.max(...listing.bids.map((b: any) => b.amount))
+      : listing.price;
 
-  const bidAmount = Number(amount);
-  const currentMaxBid = listing.bids.length > 0 
-    ? Math.max(...listing.bids.map((b: any) => b.amount)) 
-    : listing.price;
+    if (!Number.isFinite(bidAmount) || bidAmount <= currentMaxBid) {
+      return {
+        status: 400,
+        body: { error: `Votre offre doit être supérieure à l'offre actuelle (${currentMaxBid} DA).` },
+      };
+    }
 
-  if (bidAmount <= currentMaxBid) {
-    return res.status(400).json({ 
-      error: `Votre offre doit être supérieure à l'offre actuelle (${currentMaxBid} DA).` 
-    });
-  }
+    const newBid = {
+      bidderName: req.user.name,
+      bidderPhone: req.user.phone,
+      amount: bidAmount,
+      timestamp: new Date().toISOString(),
+    };
 
-  const newBid = {
-    bidderName,
-    bidderPhone,
-    amount: bidAmount,
-    timestamp: new Date().toISOString(),
-  };
+    listing.bids.push(newBid);
+    // Sort bids descending
+    listing.bids.sort((a: any, b: any) => b.amount - a.amount);
 
-  listing.bids.push(newBid);
-  // Sort bids descending
-  listing.bids.sort((a: any, b: any) => b.amount - a.amount);
-  
-  db.listings[listingIndex] = listing;
-  writeDB(db);
+    db.listings[listingIndex] = listing;
+    return { status: 200, body: withComputedRating(listing) };
+  });
 
-  res.json(withComputedRating(listing));
+  res.status(result.status).json(result.body);
 });
 
 // 5. Simulate Buying/Checkout (single item — kept for the "Acheter maintenant"
 // quick-buy flow on the listing detail page; see /api/checkout for cart purchases)
-app.post("/api/listings/:id/buy", (req: any, res) => {
-  const { buyerName, buyerPhone, buyerAddress, wilayaDelivery, deliveryType, quantity } = req.body;
+app.post("/api/listings/:id/buy", writeLimiter, requireAuth, async (req: any, res) => {
+  const { buyerAddress, wilayaDelivery, deliveryType, quantity } = req.body;
+  const buyerName = req.user.name;
+  const buyerPhone = req.user.phone;
 
-  if (!buyerName || !buyerPhone || !buyerAddress) {
+  if (!buyerAddress) {
     return res.status(400).json({ error: "Veuillez remplir vos informations de livraison." });
   }
 
-  const db = readDB();
-  const listingIndex = db.listings.findIndex((item: any) => item.id === req.params.id);
-
-  if (listingIndex === -1) {
-    return res.status(404).json({ error: "Annonce introuvable." });
-  }
-
-  const listing = db.listings[listingIndex];
-  if (req.user && req.user.email === listing.sellerEmail) {
-    return res.status(400).json({ error: "Vous ne pouvez pas acheter votre propre annonce." });
-  }
-  if (listing.sold) {
-    return res.status(400).json({ error: "Ce produit a déjà été vendu." });
-  }
-
-  const qty = Math.max(1, Number(quantity) || 1);
-  const available = typeof listing.quantity === "number" ? listing.quantity : 1;
-  if (qty > available) {
-    return res.status(400).json({ error: `Stock insuffisant (${available} disponible(s)).` });
-  }
-
-  listing.quantity = available - qty;
-  if (listing.quantity <= 0) {
-    listing.sold = true;
-    listing.soldTo = buyerName;
-  }
-  listing.buyerDetails = {
-    buyerName,
-    buyerPhone,
-    buyerAddress,
-    wilayaDelivery,
-    deliveryType,
-    quantity: qty,
-    purchasedAt: new Date().toISOString()
-  };
-
-  db.listings[listingIndex] = listing;
-  writeDB(db);
-
-  res.json(withComputedRating(listing));
-});
-
-// 5b. Multi-item cart checkout — buys several buy_it_now listings at once.
-app.post("/api/checkout", (req: any, res) => {
-  const { items, buyerName, buyerPhone, buyerAddress, wilayaDelivery, deliveryType } = req.body;
-
-  if (!buyerName || !buyerPhone || !buyerAddress) {
-    return res.status(400).json({ error: "Veuillez remplir vos informations de livraison." });
-  }
-  if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: "Votre panier est vide." });
-  }
-
-  const db = readDB();
-  const results: any[] = [];
-
-  for (const item of items) {
-    const listingId = item?.listingId;
-    const qty = Math.max(1, Number(item?.quantity) || 1);
-    const listingIndex = db.listings.findIndex((l: any) => l.id === listingId);
-
+  const result = await withDBLock((db) => {
+    const listingIndex = db.listings.findIndex((item: any) => item.id === req.params.id);
     if (listingIndex === -1) {
-      results.push({ listingId, success: false, error: "Annonce introuvable." });
-      continue;
+      return { status: 404, body: { error: "Annonce introuvable." } };
     }
+
     const listing = db.listings[listingIndex];
-    if (req.user && req.user.email === listing.sellerEmail) {
-      results.push({ listingId, success: false, error: "Vous ne pouvez pas acheter votre propre annonce." });
-      continue;
-    }
-    if (listing.type === "auction") {
-      results.push({ listingId, success: false, error: "Les enchères ne peuvent pas être achetées via le panier." });
-      continue;
+    if (req.user.email === listing.sellerEmail) {
+      return { status: 400, body: { error: "Vous ne pouvez pas acheter votre propre annonce." } };
     }
     if (listing.sold) {
-      results.push({ listingId, success: false, error: "Ce produit a déjà été vendu." });
-      continue;
+      return { status: 400, body: { error: "Ce produit a déjà été vendu." } };
     }
+
+    const qty = Math.max(1, Number(quantity) || 1);
     const available = typeof listing.quantity === "number" ? listing.quantity : 1;
     if (qty > available) {
-      results.push({ listingId, success: false, error: `Stock insuffisant (${available} disponible(s)).` });
-      continue;
+      return { status: 400, body: { error: `Stock insuffisant (${available} disponible(s)).` } };
     }
 
     listing.quantity = available - qty;
@@ -609,11 +926,78 @@ app.post("/api/checkout", (req: any, res) => {
       quantity: qty,
       purchasedAt: new Date().toISOString(),
     };
+
     db.listings[listingIndex] = listing;
-    results.push({ listingId, success: true, listing: withComputedRating(listing) });
+    return { status: 200, body: withComputedRating(listing) };
+  });
+
+  res.status(result.status).json(result.body);
+});
+
+// 5b. Multi-item cart checkout — buys several buy_it_now listings at once.
+app.post("/api/checkout", writeLimiter, requireAuth, async (req: any, res) => {
+  const { items, buyerAddress, wilayaDelivery, deliveryType } = req.body;
+  const buyerName = req.user.name;
+  const buyerPhone = req.user.phone;
+
+  if (!buyerAddress) {
+    return res.status(400).json({ error: "Veuillez remplir vos informations de livraison." });
+  }
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "Votre panier est vide." });
   }
 
-  writeDB(db);
+  const results = await withDBLock((db) => {
+    const results: any[] = [];
+
+    for (const item of items) {
+      const listingId = item?.listingId;
+      const qty = Math.max(1, Number(item?.quantity) || 1);
+      const listingIndex = db.listings.findIndex((l: any) => l.id === listingId);
+
+      if (listingIndex === -1) {
+        results.push({ listingId, success: false, error: "Annonce introuvable." });
+        continue;
+      }
+      const listing = db.listings[listingIndex];
+      if (req.user.email === listing.sellerEmail) {
+        results.push({ listingId, success: false, error: "Vous ne pouvez pas acheter votre propre annonce." });
+        continue;
+      }
+      if (listing.type === "auction") {
+        results.push({ listingId, success: false, error: "Les enchères ne peuvent pas être achetées via le panier." });
+        continue;
+      }
+      if (listing.sold) {
+        results.push({ listingId, success: false, error: "Ce produit a déjà été vendu." });
+        continue;
+      }
+      const available = typeof listing.quantity === "number" ? listing.quantity : 1;
+      if (qty > available) {
+        results.push({ listingId, success: false, error: `Stock insuffisant (${available} disponible(s)).` });
+        continue;
+      }
+
+      listing.quantity = available - qty;
+      if (listing.quantity <= 0) {
+        listing.sold = true;
+        listing.soldTo = buyerName;
+      }
+      listing.buyerDetails = {
+        buyerName,
+        buyerPhone,
+        buyerAddress,
+        wilayaDelivery,
+        deliveryType,
+        quantity: qty,
+        purchasedAt: new Date().toISOString(),
+      };
+      db.listings[listingIndex] = listing;
+      results.push({ listingId, success: true, listing: withComputedRating(listing) });
+    }
+
+    return results;
+  });
 
   const allSucceeded = results.every((r) => r.success);
   res.status(allSucceeded ? 200 : 207).json({ results });
@@ -778,15 +1162,23 @@ app.get("/api/sellers/:email", (req, res) => {
   const ratingAverage = ratingCount > 0
     ? Math.round((allReviews.reduce((sum: number, r: any) => sum + r.rating, 0) / ratingCount) * 10) / 10
     : 0;
+  const totalSales = sellerListings.filter((l: any) => l.sold).length;
+  const memberSince = dbUser?.createdAt || sellerListings[sellerListings.length - 1].createdAt;
+  const accountAgeDays = (Date.now() - new Date(memberSince).getTime()) / (1000 * 60 * 60 * 24);
+  // "Verified seller" is an in-house trust signal (not a payment/ID check):
+  // a track record of completed sales plus a solid average rating.
+  const verified = totalSales >= 3 && (ratingCount === 0 || ratingAverage >= 4) && accountAgeDays >= 7;
 
   res.json({
     name: sellerListings[0].sellerName,
     email,
     wilaya: dbUser?.wilaya || sellerListings[0].wilaya,
-    memberSince: dbUser?.createdAt || sellerListings[sellerListings.length - 1].createdAt,
+    memberSince,
     totalListings: sellerListings.length,
+    totalSales,
     ratingAverage,
     ratingCount,
+    verified,
     listings: sellerListings.filter((l: any) => !l.sold).map(withComputedRating),
   });
 });
@@ -807,36 +1199,41 @@ app.get("/api/listings/:id/messages", (req: any, res) => {
 });
 
 // 7. Post a message to a listing
-app.post("/api/listings/:id/messages", (req, res) => {
-  const { senderName, senderPhone, text } = req.body;
+app.post("/api/listings/:id/messages", writeLimiter, requireAuth, async (req: any, res) => {
+  const { text } = req.body;
 
-  if (!senderName || !text) {
-    return res.status(400).json({ error: "Le nom de l'expéditeur et le message sont requis." });
+  if (!text || !text.trim()) {
+    return res.status(400).json({ error: "Le message ne peut pas être vide." });
+  }
+  if (text.length > 2000) {
+    return res.status(400).json({ error: "Le message est trop long (2000 caractères max)." });
   }
 
-  const db = readDB();
-
-  const newMessage = {
-    id: `msg-${Date.now()}`,
-    listingId: req.params.id,
-    senderName,
-    senderPhone: senderPhone || "",
-    text,
-    timestamp: new Date().toISOString(),
-  };
-
-  db.messages.push(newMessage);
-  writeDB(db);
+  const newMessage = await withDBLock((db) => {
+    const message = {
+      id: `msg-${Date.now()}`,
+      listingId: req.params.id,
+      senderName: req.user.name,
+      senderPhone: req.user.phone || "",
+      text: text.trim(),
+      timestamp: new Date().toISOString(),
+    };
+    db.messages.push(message);
+    return message;
+  });
 
   res.status(201).json(newMessage);
 });
 
 // 8. Generate description using Gemini
-app.post("/api/generate-description", async (req, res) => {
+app.post("/api/generate-description", writeLimiter, requireAuth, async (req, res) => {
   const { title, category, condition, details } = req.body;
 
   if (!title || !category) {
     return res.status(400).json({ error: "Le titre et la catégorie sont obligatoires." });
+  }
+  if (String(title).length > 200 || String(details || "").length > 1000) {
+    return res.status(400).json({ error: "Le titre ou les détails fournis sont trop longs." });
   }
 
   const gemini = getGemini();
@@ -899,6 +1296,12 @@ async function startServer() {
     console.log(`🚀 Achri DZ - Algeria Marketplace is running at http://0.0.0.0:${PORT}`);
     console.log(`===========================================`);
   });
+
+  // Periodic sweep so expired auctions close even with no incoming traffic
+  // (readDB() already self-heals on every request, this just covers idle periods).
+  setInterval(() => {
+    withDBLock((db) => closeExpiredAuctions(db)).catch((err) => console.error("Auction sweep error:", err));
+  }, 60 * 1000);
 }
 
 startServer();

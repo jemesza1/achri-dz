@@ -11,6 +11,7 @@ import type { Listing } from "../types";
 export default function Home() {
   const { t, lang } = useI18n();
   const [listings, setListings] = useState<Listing[]>([]);
+  const [trending, setTrending] = useState<Listing[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -19,10 +20,12 @@ export default function Home() {
       .then(setListings)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
+    fetchListings({ sort: "popular" }).then(setTrending).catch(() => setTrending([]));
   }, []);
 
   const featured = listings.filter((l) => !l.sold).slice(0, 8);
   const auctions = listings.filter((l) => l.type === "auction" && !l.sold).slice(0, 4);
+  const trendingListings = trending.filter((l) => !l.sold && l.views > 0).slice(0, 4);
 
   const features = [
     { icon: ShieldCheck, title: t("home.feature.verified.title"), text: t("home.feature.verified.text") },
@@ -96,6 +99,22 @@ export default function Home() {
           </div>
         ))}
       </section>
+
+      {trendingListings.length > 0 && (
+        <section className="max-w-7xl mx-auto px-4 py-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="font-display text-xl font-bold text-ink">{t("home.trending.title")}</h2>
+            <Link to="/recherche?sort=popular" className="text-sm font-medium text-primary hover:underline flex items-center gap-1">
+              {t("home.seeAll")} <ArrowRight size={14} />
+            </Link>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+            {trendingListings.map((listing) => (
+              <ListingCard key={listing.id} listing={listing} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {auctions.length > 0 && (
         <section className="max-w-7xl mx-auto px-4 py-6">

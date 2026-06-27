@@ -54,6 +54,13 @@ export default function ListingCard({ listing }: { listing: Listing }) {
             </span>
           </div>
         )}
+        {!listing.sold && listing.auctionEnded && (
+          <div className="absolute inset-0 bg-ink/60 flex items-center justify-center">
+            <span className="text-white font-display font-bold text-sm tracking-wide uppercase border-2 border-white px-3 py-1 rounded">
+              {t("card.auctionEnded")}
+            </span>
+          </div>
+        )}
         {isAuction && !listing.sold && (
           <span className="absolute top-2 left-2 flex items-center gap-1 bg-ink/85 text-white text-xs font-medium px-2 py-1 rounded-full">
             <Gavel size={11} /> {t("card.auction")}

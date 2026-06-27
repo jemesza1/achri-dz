@@ -41,6 +41,51 @@ export async function loginAccount(payload: { email: string; password: string })
   return handle<CurrentUser>(res);
 }
 
+export async function googleLogin(idToken: string): Promise<CurrentUser> {
+  const res = await fetch(`${BASE}/auth/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ idToken }),
+  });
+  return handle<CurrentUser>(res);
+}
+
+export async function resendVerificationEmail(): Promise<void> {
+  const res = await fetch(`${BASE}/auth/resend-verification-email`, {
+    method: "POST",
+    credentials: "include",
+  });
+  return handle<void>(res);
+}
+
+export async function requestPhoneOtp(): Promise<void> {
+  const res = await fetch(`${BASE}/auth/request-phone-otp`, {
+    method: "POST",
+    credentials: "include",
+  });
+  return handle<void>(res);
+}
+
+export async function verifyPhoneOtp(code: string): Promise<CurrentUser> {
+  const res = await fetch(`${BASE}/auth/verify-phone-otp`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ code }),
+  });
+  return handle<CurrentUser>(res);
+}
+
+export interface AppConfig {
+  googleClientId: string | null;
+}
+
+export async function fetchAppConfig(): Promise<AppConfig> {
+  const res = await fetch(`${BASE}/config`);
+  return handle<AppConfig>(res);
+}
+
 export async function logoutAccount(): Promise<void> {
   const res = await fetch(`${BASE}/auth/logout`, {
     method: "POST",
@@ -62,20 +107,46 @@ export interface ListingFilters {
   type?: string;
   sellerEmail?: string;
   transactionMode?: string;
+  minPrice?: number;
+  maxPrice?: number;
+  sort?: "newest" | "price_asc" | "price_desc" | "popular";
+  page?: number;
+  pageSize?: number;
 }
 
 export async function fetchListings(filters: ListingFilters = {}): Promise<Listing[]> {
   const params = new URLSearchParams();
   Object.entries(filters).forEach(([key, value]) => {
-    if (value) params.set(key, value);
+    if (value !== undefined && value !== "") params.set(key, String(value));
   });
   const res = await fetch(`${BASE}/listings?${params.toString()}`);
   return handle<Listing[]>(res);
 }
 
+export interface PagedListings {
+  items: Listing[];
+  total: number;
+}
+
+export async function fetchListingsPaged(filters: ListingFilters = {}): Promise<PagedListings> {
+  const params = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  });
+  const res = await fetch(`${BASE}/listings?${params.toString()}`);
+  const items = await handle<Listing[]>(res);
+  const total = Number(res.headers.get("X-Total-Count")) || items.length;
+  return { items, total };
+}
+
 export async function fetchListing(id: string): Promise<Listing> {
   const res = await fetch(`${BASE}/listings/${id}`);
   return handle<Listing>(res);
+}
+
+export async function fetchSimilarListings(id: string, limit = 8): Promise<Listing[]> {
+  const res = await fetch(`${BASE}/listings/${id}/similar?limit=${limit}`);
+  return handle<Listing[]>(res);
 }
 
 export async function createListing(payload: Partial<Listing>): Promise<Listing> {
@@ -90,11 +161,12 @@ export async function createListing(payload: Partial<Listing>): Promise<Listing>
 
 export async function placeBid(
   id: string,
-  payload: { bidderName: string; bidderPhone: string; amount: number }
+  payload: { amount: number }
 ): Promise<Listing> {
   const res = await fetch(`${BASE}/listings/${id}/bids`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(payload),
   });
   return handle<Listing>(res);
@@ -103,8 +175,6 @@ export async function placeBid(
 export async function buyListing(
   id: string,
   payload: {
-    buyerName: string;
-    buyerPhone: string;
     buyerAddress: string;
     wilayaDelivery?: string;
     deliveryType?: string;
@@ -114,6 +184,7 @@ export async function buyListing(
   const res = await fetch(`${BASE}/listings/${id}/buy`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(payload),
   });
   return handle<Listing>(res);
@@ -130,8 +201,6 @@ export interface CheckoutResult {
 
 export async function checkout(payload: {
   items: { listingId: string; quantity: number }[];
-  buyerName: string;
-  buyerPhone: string;
   buyerAddress: string;
   wilayaDelivery?: string;
   deliveryType?: string;
@@ -182,11 +251,12 @@ export async function fetchMessages(listingId: string): Promise<Message[]> {
 
 export async function postMessage(
   listingId: string,
-  payload: { senderName: string; senderPhone?: string; text: string }
+  payload: { text: string }
 ): Promise<Message> {
   const res = await fetch(`${BASE}/listings/${listingId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(payload),
   });
   return handle<Message>(res);
@@ -223,8 +293,10 @@ export interface SellerProfile {
   wilaya: string;
   memberSince: string;
   totalListings: number;
+  totalSales: number;
   ratingAverage: number;
   ratingCount: number;
+  verified: boolean;
   listings: Listing[];
 }
 
@@ -242,6 +314,7 @@ export async function generateDescription(payload: {
   const res = await fetch(`${BASE}/generate-description`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    credentials: "include",
     body: JSON.stringify(payload),
   });
   return handle<{ description: string }>(res);

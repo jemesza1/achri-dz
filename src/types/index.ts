@@ -51,6 +51,7 @@ export interface Listing {
   soldTo: string | null;
   buyerDetails?: BuyerDetails;
   auctionEnd?: string;
+  auctionEnded?: boolean;
   reviews: Review[];
   ratingAverage: number;
   ratingCount: number;
@@ -72,6 +73,9 @@ export interface CurrentUser {
   phone: string;
   wilaya: string;
   favorites: string[];
+  emailVerified: boolean;
+  phoneVerified: boolean;
+  authProvider: "local" | "google";
 }
 
 export interface CartItem {

@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { MapPin, Eye, Clock, ShieldCheck, Phone, Send, Gavel, ShoppingBag, CheckCircle2, Heart, Star, ShoppingCart } from "lucide-react";
 import type { Listing, Message } from "../types";
-import { fetchListing, placeBid, buyListing, fetchMessages, postMessage, toggleFavorite, submitReview } from "../lib/api";
+import { fetchListing, placeBid, buyListing, fetchMessages, postMessage, toggleFavorite, submitReview, fetchSimilarListings } from "../lib/api";
+import ListingCard from "../components/ListingCard";
 import { formatPrice, timeAgo, auctionCountdown, currentBidAmount } from "../lib/format";
 import { useAuth } from "../lib/auth";
 import { useCart } from "../lib/cart";
@@ -168,16 +169,20 @@ export default function ListingDetail() {
               </p>
             )}
 
-            {!listing.sold && !isOwner && (
+            {isAuction && listing.auctionEnded && !listing.sold && (
+              <p className="text-sm text-ink-soft mt-3 italic">{t("detail.auctionEndedNoBids")}</p>
+            )}
+
+            {!listing.sold && !listing.auctionEnded && !isOwner && (
               <div className="mt-4">
                 {isAuction ? (
                   !countdown?.ended && (
                     <BidForm
                       currentBid={displayPrice}
-                      onSubmit={async (bidderName, bidderPhone, amount) => {
+                      onSubmit={async (amount) => {
                         setActionError("");
                         try {
-                          const updated = await placeBid(listing.id, { bidderName, bidderPhone, amount });
+                          const updated = await placeBid(listing.id, { amount });
                           setListing(updated);
                           setActionSuccess(t("detail.bidPlaced"));
                         } catch (err: any) {
@@ -244,6 +249,10 @@ export default function ListingDetail() {
 
           <SellerCard listing={listing} />
 
+          <p className="flex items-center gap-1.5 text-xs text-ink-soft">
+            <ShieldCheck size={13} className="text-primary shrink-0" /> {t("trust.banner")}
+          </p>
+
           {!isOwner && <MessagingSection listingId={listing.id} />}
         </div>
       </div>
@@ -267,6 +276,30 @@ export default function ListingDetail() {
           }
         }}
       />
+
+      <SimilarListings listingId={listing.id} />
+    </div>
+  );
+}
+
+function SimilarListings({ listingId }: { listingId: string }) {
+  const { t } = useI18n();
+  const [similar, setSimilar] = useState<Listing[]>([]);
+
+  useEffect(() => {
+    fetchSimilarListings(listingId).then(setSimilar).catch(() => setSimilar([]));
+  }, [listingId]);
+
+  if (similar.length === 0) return null;
+
+  return (
+    <div className="mt-12 max-w-6xl">
+      <h2 className="font-display text-lg font-bold text-ink mb-4">{t("detail.similar")}</h2>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+        {similar.map((listing) => (
+          <ListingCard key={listing.id} listing={listing} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -392,58 +425,46 @@ function BidForm({
   onSubmit,
 }: {
   currentBid: number;
-  onSubmit: (name: string, phone: string, amount: number) => Promise<void>;
+  onSubmit: (amount: number) => Promise<void>;
 }) {
   const { user } = useAuth();
   const { t } = useI18n();
-  const [name, setName] = useState(user?.name || "");
-  const [phone, setPhone] = useState(user?.phone || "");
   const [amount, setAmount] = useState(currentBid + 500);
   const [submitting, setSubmitting] = useState(false);
+
+  if (!user) {
+    return (
+      <p className="text-sm text-ink-soft">
+        <Link to="/connexion" className="text-primary font-medium hover:underline">{t("detail.loginToReview")}</Link> {t("detail.loginToReviewSuffix")}
+      </p>
+    );
+  }
 
   return (
     <form
       onSubmit={async (e) => {
         e.preventDefault();
         setSubmitting(true);
-        await onSubmit(name, phone, amount);
+        await onSubmit(amount);
         setSubmitting(false);
       }}
-      className="space-y-2.5"
+      className="flex gap-2.5"
     >
-      <div className="grid grid-cols-2 gap-2.5">
-        <input
-          required
-          placeholder={t("detail.yourName")}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-        />
-        <input
-          required
-          placeholder={t("bid.phone")}
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-        />
-      </div>
-      <div className="flex gap-2.5">
-        <input
-          required
-          type="number"
-          min={currentBid + 1}
-          value={amount}
-          onChange={(e) => setAmount(Number(e.target.value))}
-          className="h-10 flex-1 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
-        />
-        <button
-          type="submit"
-          disabled={submitting}
-          className="h-10 px-5 rounded-lg bg-amber text-ink font-semibold text-sm flex items-center gap-1.5 hover:bg-amber-dark hover:text-white transition-colors disabled:opacity-60"
-        >
-          <Gavel size={15} /> {submitting ? t("bid.submitting") : t("bid.place")}
-        </button>
-      </div>
+      <input
+        required
+        type="number"
+        min={currentBid + 1}
+        value={amount}
+        onChange={(e) => setAmount(Number(e.target.value))}
+        className="h-10 flex-1 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40"
+      />
+      <button
+        type="submit"
+        disabled={submitting}
+        className="h-10 px-5 rounded-lg bg-amber text-ink font-semibold text-sm flex items-center gap-1.5 hover:bg-amber-dark hover:text-white transition-colors disabled:opacity-60"
+      >
+        <Gavel size={15} /> {submitting ? t("bid.submitting") : t("bid.place")}
+      </button>
     </form>
   );
 }
@@ -453,18 +474,24 @@ function BuyForm({
   onSubmit,
 }: {
   maxQuantity: number;
-  onSubmit: (data: { buyerName: string; buyerPhone: string; buyerAddress: string; wilayaDelivery: string; deliveryType: string; quantity: number }) => Promise<void>;
+  onSubmit: (data: { buyerAddress: string; wilayaDelivery: string; deliveryType: string; quantity: number }) => Promise<void>;
 }) {
   const { user } = useAuth();
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  const [buyerName, setBuyerName] = useState(user?.name || "");
-  const [buyerPhone, setBuyerPhone] = useState(user?.phone || "");
   const [buyerAddress, setBuyerAddress] = useState("");
   const [wilayaDelivery, setWilayaDelivery] = useState(user?.wilaya || "");
   const [deliveryType, setDeliveryType] = useState("domicile");
   const [quantity, setQuantity] = useState(1);
   const [submitting, setSubmitting] = useState(false);
+
+  if (!user) {
+    return (
+      <p className="text-sm text-ink-soft">
+        <Link to="/connexion" className="text-primary font-medium hover:underline">{t("detail.loginToReview")}</Link> {t("detail.loginToReviewSuffix")}
+      </p>
+    );
+  }
 
   if (!open) {
     return (
@@ -482,15 +509,11 @@ function BuyForm({
       onSubmit={async (e) => {
         e.preventDefault();
         setSubmitting(true);
-        await onSubmit({ buyerName, buyerPhone, buyerAddress, wilayaDelivery, deliveryType, quantity });
+        await onSubmit({ buyerAddress, wilayaDelivery, deliveryType, quantity });
         setSubmitting(false);
       }}
       className="space-y-2.5"
     >
-      <div className="grid grid-cols-2 gap-2.5">
-        <input required placeholder={t("detail.yourName")} value={buyerName} onChange={(e) => setBuyerName(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-        <input required placeholder={t("login.phone")} value={buyerPhone} onChange={(e) => setBuyerPhone(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-      </div>
       <input required placeholder={t("buy.deliveryAddress")} value={buyerAddress} onChange={(e) => setBuyerAddress(e.target.value)} className="w-full h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
       <div className="grid grid-cols-2 gap-2.5">
         <input placeholder={t("buy.wilayaDelivery")} value={wilayaDelivery} onChange={(e) => setWilayaDelivery(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
@@ -528,8 +551,6 @@ function MessagingSection({ listingId }: { listingId: string }) {
   const { t } = useI18n();
   const [messages, setMessages] = useState<Message[]>([]);
   const [text, setText] = useState("");
-  const [name, setName] = useState(user?.name || "");
-  const [phone, setPhone] = useState(user?.phone || "");
   const [sending, setSending] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
@@ -539,10 +560,10 @@ function MessagingSection({ listingId }: { listingId: string }) {
 
   async function handleSend(e: React.FormEvent) {
     e.preventDefault();
-    if (!text.trim() || !name.trim()) return;
+    if (!text.trim()) return;
     setSending(true);
     try {
-      const msg = await postMessage(listingId, { senderName: name, senderPhone: phone, text: text.trim() });
+      const msg = await postMessage(listingId, { text: text.trim() });
       setMessages((prev) => [...prev, msg]);
       setText("");
     } finally {
@@ -567,14 +588,8 @@ function MessagingSection({ listingId }: { listingId: string }) {
         </div>
       )}
 
-      <form onSubmit={handleSend} className="space-y-2">
-        {!user && (
-          <div className="grid grid-cols-2 gap-2">
-            <input required placeholder={t("detail.yourName")} value={name} onChange={(e) => setName(e.target.value)} className="h-9 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-            <input placeholder={t("detail.phoneOptional")} value={phone} onChange={(e) => setPhone(e.target.value)} className="h-9 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-          </div>
-        )}
-        <div className="flex gap-2">
+      {user ? (
+        <form onSubmit={handleSend} className="flex gap-2">
           <input
             required
             placeholder={t("detail.yourMessage")}
@@ -589,8 +604,12 @@ function MessagingSection({ listingId }: { listingId: string }) {
           >
             {t("detail.send")}
           </button>
-        </div>
-      </form>
+        </form>
+      ) : (
+        <p className="text-sm text-ink-soft">
+          <Link to="/connexion" className="text-primary font-medium hover:underline">{t("detail.loginToReview")}</Link> {t("detail.loginToReviewSuffix")}
+        </p>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Trash2, ShoppingCart, CheckCircle2 } from "lucide-react";
+import { Trash2, ShoppingCart, CheckCircle2, ShieldCheck } from "lucide-react";
 import { useCart } from "../lib/cart";
 import { useAuth } from "../lib/auth";
 import { fetchListing, checkout, type CheckoutResult } from "../lib/api";
@@ -18,8 +18,6 @@ export default function Cart() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [buyerName, setBuyerName] = useState(user?.name || "");
-  const [buyerPhone, setBuyerPhone] = useState(user?.phone || "");
   const [buyerAddress, setBuyerAddress] = useState("");
   const [wilayaDelivery, setWilayaDelivery] = useState(user?.wilaya || "");
   const [deliveryType, setDeliveryType] = useState("domicile");
@@ -50,8 +48,6 @@ export default function Cart() {
     try {
       const { results: r } = await checkout({
         items: items.map((i) => ({ listingId: i.listingId, quantity: i.quantity })),
-        buyerName,
-        buyerPhone,
         buyerAddress,
         wilayaDelivery,
         deliveryType,
@@ -146,31 +142,37 @@ export default function Cart() {
             <span className="price-tag text-xl text-primary">{formatPrice(total)}</span>
           </div>
 
-          <form onSubmit={handleCheckout} className="border border-ink/10 rounded-2xl p-5 space-y-3">
-            <h2 className="font-display font-semibold text-sm text-ink mb-1">{t("cart.deliveryInfo")}</h2>
-            <div className="grid grid-cols-2 gap-3">
-              <input required placeholder={t("detail.yourName")} value={buyerName} onChange={(e) => setBuyerName(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-              <input required placeholder={t("login.phone")} value={buyerPhone} onChange={(e) => setBuyerPhone(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-            </div>
-            <input required placeholder={t("buy.deliveryAddress")} value={buyerAddress} onChange={(e) => setBuyerAddress(e.target.value)} className="w-full h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-            <div className="grid grid-cols-2 gap-3">
-              <input placeholder={t("buy.wilayaDelivery")} value={wilayaDelivery} onChange={(e) => setWilayaDelivery(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
-              <select value={deliveryType} onChange={(e) => setDeliveryType(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40">
-                <option value="domicile">{t("buy.deliveryHome")}</option>
-                <option value="point_relais">{t("buy.deliveryPickup")}</option>
-              </select>
-            </div>
+          <p className="flex items-center gap-1.5 text-xs text-ink-soft mb-4">
+            <ShieldCheck size={13} className="text-primary shrink-0" /> {t("trust.banner")}
+          </p>
 
-            {error && <p className="text-rose text-sm">{error}</p>}
+          {user ? (
+            <form onSubmit={handleCheckout} className="border border-ink/10 rounded-2xl p-5 space-y-3">
+              <h2 className="font-display font-semibold text-sm text-ink mb-1">{t("cart.deliveryInfo")}</h2>
+              <input required placeholder={t("buy.deliveryAddress")} value={buyerAddress} onChange={(e) => setBuyerAddress(e.target.value)} className="w-full h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+              <div className="grid grid-cols-2 gap-3">
+                <input placeholder={t("buy.wilayaDelivery")} value={wilayaDelivery} onChange={(e) => setWilayaDelivery(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40" />
+                <select value={deliveryType} onChange={(e) => setDeliveryType(e.target.value)} className="h-10 rounded-lg border border-ink/15 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/40">
+                  <option value="domicile">{t("buy.deliveryHome")}</option>
+                  <option value="point_relais">{t("buy.deliveryPickup")}</option>
+                </select>
+              </div>
 
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full h-11 rounded-lg bg-primary text-white font-semibold text-sm hover:bg-primary-dark transition-colors disabled:opacity-60"
-            >
-              {submitting ? t("buy.confirming") : `${t("cart.order")} (${formatPrice(total)})`}
-            </button>
-          </form>
+              {error && <p className="text-rose text-sm">{error}</p>}
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full h-11 rounded-lg bg-primary text-white font-semibold text-sm hover:bg-primary-dark transition-colors disabled:opacity-60"
+              >
+                {submitting ? t("buy.confirming") : `${t("cart.order")} (${formatPrice(total)})`}
+              </button>
+            </form>
+          ) : (
+            <p className="text-sm text-ink-soft border border-ink/10 rounded-2xl p-5">
+              <Link to="/connexion" className="text-primary font-medium hover:underline">{t("detail.loginToReview")}</Link> {t("detail.loginToReviewSuffix")}
+            </p>
+          )}
 
           <button onClick={() => { clear(); navigate("/"); }} className="text-sm text-ink-soft hover:underline mt-4">
             {t("cart.clear")}

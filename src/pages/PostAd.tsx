@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Navigate, useNavigate } from "react-router-dom";
+import { Navigate, useNavigate, Link } from "react-router-dom";
 import { Sparkles, ImageIcon, Gavel, ShoppingBag } from "lucide-react";
 import { createListing, generateDescription } from "../lib/api";
 import { useAuth } from "../lib/auth";
@@ -28,6 +28,7 @@ export default function PostAd() {
   const [generating, setGenerating] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [needsVerification, setNeedsVerification] = useState(false);
 
   // Posting an ad requires a real account now — the server derives the
   // seller's identity from the session rather than trusting form fields.
@@ -75,6 +76,9 @@ export default function PostAd() {
       navigate(`/annonce/${listing.id}`);
     } catch (err: any) {
       setError(err.message);
+      if (err.message?.includes("vérifier")) {
+        setNeedsVerification(true);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -254,7 +258,14 @@ export default function PostAd() {
           </Field>
         </div>
 
-        {error && <p className="text-rose text-sm">{error}</p>}
+        {error && (
+          <p className="text-rose text-sm">
+            {error}{" "}
+            {needsVerification && (
+              <Link to="/profil" className="font-medium underline">{t("verify.title")}</Link>
+            )}
+          </p>
+        )}
 
         <button
           type="submit"

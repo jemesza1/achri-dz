@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { Plus, Eye, CheckCircle2, RotateCcw, Trash2 } from "lucide-react";
 import ListingCard from "../components/ListingCard";
+import VerificationPanel from "../components/VerificationPanel";
 import { fetchListings, updateListing, deleteListing } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useI18n, tWilaya } from "../lib/i18n";
@@ -59,6 +60,8 @@ export default function Profile() {
           <p className="text-sm text-ink-soft">{user.email} · {tWilaya(lang, user.wilaya)}</p>
         </div>
       </div>
+
+      <VerificationPanel />
 
       <div className="flex items-center justify-between mb-4">
         <h2 className="font-display text-lg font-bold text-ink">{t("profile.myListings")}</h2>

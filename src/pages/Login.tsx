@@ -3,6 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { useI18n, tWilaya } from "../lib/i18n";
 import { WILAYAS } from "../types";
+import GoogleSignInButton from "../components/GoogleSignInButton";
 
 export default function Login() {
   const { login, register } = useAuth();
@@ -67,6 +68,15 @@ export default function Login() {
         >
           {t("login.tab.register")}
         </button>
+      </div>
+
+      <div className="mb-5">
+        <GoogleSignInButton />
+        <div className="flex items-center gap-3 mt-5">
+          <div className="flex-1 h-px bg-ink/10" />
+          <span className="text-xs text-ink-soft">{t("login.or")}</span>
+          <div className="flex-1 h-px bg-ink/10" />
+        </div>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">

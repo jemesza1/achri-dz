@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { CurrentUser } from "../types";
-import { fetchCurrentUser, loginAccount, logoutAccount, registerAccount } from "./api";
+import { fetchCurrentUser, loginAccount, logoutAccount, registerAccount, googleLogin } from "./api";
 
 interface AuthContextValue {
   user: CurrentUser | null;
@@ -13,6 +13,7 @@ interface AuthContextValue {
     wilaya: string;
     password: string;
   }) => Promise<CurrentUser>;
+  loginWithGoogle: (idToken: string) => Promise<CurrentUser>;
   logout: () => Promise<void>;
   setUser: (user: CurrentUser | null) => void;
 }
@@ -51,13 +52,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return newUser;
   }
 
+  async function loginWithGoogle(idToken: string) {
+    const loggedInUser = await googleLogin(idToken);
+    setUser(loggedInUser);
+    return loggedInUser;
+  }
+
   async function logout() {
     await logoutAccount().catch(() => {});
     setUser(null);
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, setUser }}>
+    <AuthContext.Provider value={{ user, loading, login, register, loginWithGoogle, logout, setUser }}>
       {children}
     </AuthContext.Provider>
   );

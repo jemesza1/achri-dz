@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Star, MapPin, CalendarDays, PackageSearch } from "lucide-react";
+import { Star, MapPin, CalendarDays, PackageSearch, ShieldCheck, BadgeCheck } from "lucide-react";
 import ListingCard from "../components/ListingCard";
 import { fetchSellerProfile, type SellerProfile as SellerProfileType } from "../lib/api";
 import { useI18n, tWilaya } from "../lib/i18n";
@@ -43,14 +43,23 @@ export default function SellerProfile() {
         <div className="flex-1 min-w-0">
           <h1 className="font-display text-xl font-bold text-ink flex items-center gap-2">
             {profile.name}
-            <span className="text-xs font-medium text-primary bg-primary-light px-2 py-0.5 rounded-full">
-              {t("seller.badge")}
-            </span>
+            {profile.verified ? (
+              <span className="flex items-center gap-1 text-xs font-medium text-primary bg-primary-light px-2 py-0.5 rounded-full">
+                <BadgeCheck size={13} /> {t("seller.verifiedBadge")}
+              </span>
+            ) : (
+              <span className="text-xs font-medium text-ink-soft bg-sand-dim px-2 py-0.5 rounded-full">
+                {t("seller.badge")}
+              </span>
+            )}
           </h1>
           <div className="flex flex-wrap items-center gap-3 text-sm text-ink-soft mt-1">
             <span className="flex items-center gap-1"><MapPin size={14} /> {tWilaya(lang, profile.wilaya)}</span>
             <span className="flex items-center gap-1"><CalendarDays size={14} /> {t("seller.memberSince")} {memberSinceDate}</span>
             <span className="flex items-center gap-1"><PackageSearch size={14} /> {profile.totalListings} {t("seller.totalListings")}</span>
+            {profile.totalSales > 0 && (
+              <span className="flex items-center gap-1"><ShieldCheck size={14} /> {profile.totalSales} {t("seller.totalSales")}</span>
+            )}
           </div>
         </div>
         <div className="text-right shrink-0">
