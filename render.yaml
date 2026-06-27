@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: achri-dz
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+    # NOTE: the free plan has an ephemeral filesystem — data/db.json is wiped
+    # on every redeploy/restart. To persist real user data, either upgrade to
+    # a paid plan and add a persistent disk (see Render docs), or migrate to
+    # an external database. See README "Checklist avant de passer en public".

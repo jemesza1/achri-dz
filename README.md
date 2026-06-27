@@ -53,18 +53,30 @@ Une marketplace complète (style eBay) construite avec React, Express et l'API G
 - Définissez `APP_URL` en production avec l'URL exacte de votre site déployé — c'est la seule origine autorisée à faire des requêtes authentifiées (CORS), et c'est aussi le domaine utilisé dans les liens de vérification email. En développement, toute origine `localhost` est acceptée.
 - Si vous forkez/publiez ce dépôt, vérifiez qu'aucune clé réelle (`GEMINI_API_KEY`, `JWT_SECRET`, `GOOGLE_CLIENT_ID`, `SMTP_PASS`, `TWILIO_AUTH_TOKEN`, etc.) n'a été committée par erreur avant de rendre le dépôt public — `git log -p` ou un scanner de secrets (ex. `gitleaks`) peuvent aider.
 
+## Déploiement (Render)
+
+Ce projet a un vrai backend Express (auth, base de données, API) — **il ne peut donc pas être hébergé sur GitHub Pages** (fichiers statiques uniquement). Le déploiement recommandé est [Render](https://render.com), gratuit pour démarrer :
+
+1. Sur [dashboard.render.com](https://dashboard.render.com), **New → Blueprint**, connectez ce dépôt GitHub. Render détecte automatiquement `render.yaml` à la racine et configure le service (build : `npm ci && npm run build`, démarrage : `npm start`).
+2. Une fois le service créé, allez dans **Environment** et renseignez les variables marquées `sync: false` dans `render.yaml` (voir la liste ci-dessous) — Render ne les devine pas, il faut les saisir manuellement.
+3. Render fournit HTTPS automatiquement sur le sous-domaine `*.onrender.com` (ou un domaine personnalisé si vous en ajoutez un).
+
+⚠️ **Limitation importante du plan gratuit** : le système de fichiers est **éphémère** — `data/db.json` (comptes, annonces, messages) est remis à zéro à chaque redéploiement ou redémarrage du service. Pour de vrais utilisateurs en production, il faut soit :
+- passer à un plan payant Render et ajouter un disque persistant (Render → service → Disks), soit
+- migrer le stockage vers une vraie base de données externe (PostgreSQL géré, par ex. Render Postgres ou Supabase) — non implémenté actuellement.
+
 ## Checklist avant de passer en public
 
-1. **Variables d'environnement** (à définir sur la plateforme d'hébergement, jamais committées) :
+1. **Hébergement compatible Node.js** (voir section Déploiement ci-dessus) — bloquant, GitHub Pages ne fonctionnera pas.
+2. **Variables d'environnement** (à définir sur la plateforme d'hébergement, jamais committées) :
    - `JWT_SECRET` — obligatoire, sinon le serveur refuse de démarrer en production.
-   - `APP_URL` — l'URL exacte du site déployé (ex. `https://achridz.com`).
+   - `APP_URL` — l'URL exacte du site déployé (ex. `https://achri-dz.onrender.com`).
    - `GEMINI_API_KEY` — optionnel, sinon génération de description en mode démo.
    - `GOOGLE_CLIENT_ID` — optionnel, sinon le bouton Google est masqué.
    - `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` — requis pour envoyer de vrais emails de vérification. Sans eux, les liens ne partent que dans les logs serveur.
    - `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` — requis pour envoyer de vrais SMS. Sans eux, les codes ne partent que dans les logs serveur.
-2. **HTTPS** — le cookie de session passe en mode `secure` automatiquement dès que `NODE_ENV=production` ; le site doit donc être servi en HTTPS (la plupart des hébergeurs le font automatiquement).
-3. **Build** : `npm run build` puis `npm start` (et non `npm run dev`, qui sert le frontend via Vite en mode dev).
-4. **Sauvegarde des données** — `data/db.json` est un fichier unique sur disque : pensez à une sauvegarde régulière (export/cron) avant d'avoir de vrais utilisateurs, et vérifiez que l'hébergeur choisi a un disque persistant (certains PaaS réinitialisent le système de fichiers à chaque déploiement).
+3. **HTTPS** — le cookie de session passe en mode `secure` automatiquement dès que `NODE_ENV=production` ; le site doit donc être servi en HTTPS (Render le fait automatiquement).
+4. **Persistance des données** — voir l'avertissement sur le plan gratuit Render ci-dessus ; ne pas lancer publiquement sans avoir réglé ce point, sous peine de perdre tous les comptes/annonces au prochain redéploiement.
 5. **Limites de débit** déjà en place : 100 req/15 min par IP sur `/api/`, 20/15 min sur les routes d'authentification, 30/15 min sur les actions sensibles (enchères, achats, messages, génération IA) — à ajuster dans `server.ts` selon le trafic réel observé.
 
 ## Notes
